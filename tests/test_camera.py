@@ -1,7 +1,11 @@
 import sys
+
 import cv2
 
-cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+# V4L2 exists on Linux only; elsewhere let OpenCV pick the default backend.
+_CAM_BACKEND = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
+
+cap = cv2.VideoCapture(0, _CAM_BACKEND)
 if not cap.isOpened():
     sys.exit("ERROR: Cannot open camera (index 0).")
 

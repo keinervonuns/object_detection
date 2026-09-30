@@ -1,11 +1,13 @@
 """
 config.py — All settings for the OmniXAI Detection Pipeline.
 
-Edit CLASSES to match your actual folder names, tweak training
+Edit CLASSES to define your classes (the keys are the `source/<class>/` folder
+names — `setup_data.py --init` creates them for you). Tweak the training
 hyper-parameters, then run:
-    python setup_data.py   # creates folder skeleton
-    python train.py        # trains the model
-    python run.py         # real-time camera inference
+    python setup_data.py --init   # create the source/<class>/ folders
+    python setup_data.py          # split into data/train + data/val
+    python train.py               # trains the model
+    python run.py                 # real-time camera inference
 """
 
 from pathlib import Path

@@ -3,15 +3,17 @@ run.py — Real-time camera inference with OmniXAI explainability.
 
 Usage
 ─────
-    python run.py                # no GPIO LED output
+    python run.py                # LED output on — warns and disables it if
+                                 #   RPi.GPIO is unavailable
+    python run.py --no-gpio      # no GPIO LED output (e.g. on the training PC)
     sudo python3 run.py          # on the Pi — drives the GPIO LEDs
 
 The predicted class is broadcast on four GPIO pins. GPIO output is on by
 default; pass --no-gpio to disable it (e.g. on the training PC, or when
 RPi.GPIO is unavailable). On the Pi, run with the system python3 and sudo so
-RPi.GPIO is importable — the project venv (Torch/venv) is added to sys.path so
-the heavy packages still load from it. GPIO is initialised below, *before* those
-imports, which can otherwise interfere with GPIO setup.
+RPi.GPIO is importable — the project venv (`venv/` in the project root) is
+added to sys.path so the heavy packages still load from it. GPIO is initialised
+below, *before* those imports, which can otherwise interfere with GPIO setup.
 
 Controls
 ────────
@@ -77,6 +79,14 @@ from torchvision import models
 import config
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  Camera
+# ──────────────────────────────────────────────────────────────────────────────
+
+# V4L2 exists on Linux only; elsewhere let OpenCV pick the default backend.
+_CAM_BACKEND = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  Region rectangle  (inline editor — saves to INI)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -84,11 +94,23 @@ _REGION_INI = config.BASE_DIR / "regions" / "region_config.ini"
 
 _REGION_STEP = 8   # pixels moved per key-press
 
-# Extended key codes (cv2.waitKeyEx on Linux/X11)
-_KEY_UP    = 65362
-_KEY_DOWN  = 65364
-_KEY_LEFT  = 65361
-_KEY_RIGHT = 65363
+# Arrow keys: cv2.waitKeyEx() returns backend-specific codes —
+#   Linux/X11 (GTK/Qt): the keysym            — 65361 … 65364
+#   Windows (Win32):    the virtual key << 16 — 0x250000 … 0x280000
+_ARROW_KEYS = {
+    65361: "left",   65362: "up",     65363: "right", 65364: "down",
+    0x250000: "left", 0x260000: "up", 0x270000: "right", 0x280000: "down",
+}
+
+
+def arrow_direction(raw_key: int) -> Optional[str]:
+    """Return 'up'/'down'/'left'/'right' for an arrow-key press, otherwise None.
+
+    Accepts both the X11 keysyms (Linux — with the modifier state packed into
+    the high half, hence the `& 0xFFFF` retry) and the Win32 `virtual_key << 16`
+    codes, so region editing works on the Pi and on the training PC alike.
+    """
+    return _ARROW_KEYS.get(raw_key) or _ARROW_KEYS.get(raw_key & 0xFFFF)
 
 
 def load_region_rect(w: int, h: int) -> dict:
@@ -251,18 +273,36 @@ _STD  = [0.229, 0.224, 0.225]
 
 # Pre-computed constants for fast OpenCV-based preprocessing (no PIL overhead)
 _RESIZE_SIZE = int(config.IMG_SIZE * 1.15)   # 257 for IMG_SIZE=224
-_CROP_START  = (_RESIZE_SIZE - config.IMG_SIZE) // 2
 _mean_t      = torch.tensor(_MEAN).view(3, 1, 1)
 _std_t       = torch.tensor(_STD).view(3, 1, 1)
 
 
+def model_input(bgr_frame: np.ndarray) -> np.ndarray:
+    """Crop a BGR frame to the model's input geometry — (IMG_SIZE, IMG_SIZE, 3) RGB.
+
+    Mirrors `train.py`'s validation transform: the *shorter* edge is scaled to
+    `IMG_SIZE * 1.15` with the aspect ratio preserved, then the centre square is
+    cropped. Works for any camera resolution, so inference sees the same framing
+    the model was trained on.
+    """
+    rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+    h, w = rgb.shape[:2]
+
+    scale = _RESIZE_SIZE / min(h, w)
+    new_w, new_h = max(1, round(w * scale)), max(1, round(h * scale))
+    # Area interpolation when shrinking — closest to the PIL filter torchvision
+    # applies for training — and linear when the frame is smaller than the crop.
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    resized = cv2.resize(rgb, (new_w, new_h), interpolation=interp)
+
+    y0 = max(0, (new_h - config.IMG_SIZE) // 2)
+    x0 = max(0, (new_w - config.IMG_SIZE) // 2)
+    return resized[y0 : y0 + config.IMG_SIZE, x0 : x0 + config.IMG_SIZE]
+
+
 def preprocess(bgr_frame: np.ndarray) -> torch.Tensor:
     """Convert a BGR OpenCV frame to a normalised (1,C,H,W) tensor (OpenCV, no PIL)."""
-    rgb     = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-    resized = cv2.resize(rgb, (_RESIZE_SIZE, _RESIZE_SIZE),
-                         interpolation=cv2.INTER_LINEAR)
-    s       = _CROP_START
-    cropped = resized[s : s + config.IMG_SIZE, s : s + config.IMG_SIZE]
+    cropped = np.ascontiguousarray(model_input(bgr_frame))
     # uint8 HWC  →  float32 CHW tensor, normalised
     t = torch.from_numpy(cropped).permute(2, 0, 1).float().div_(255.0)
     t.sub_(_mean_t).div_(_std_t)
@@ -516,7 +556,7 @@ def draw_ui(
         status_str = (
             f"FPS {fps:5.1f}  |  "
             f"{'GradCAM ON' if gradcam_on else 'GradCAM OFF'}  |  "
-            "[g] toggle  [s] save  [e] region  [r] fps  [q] quit"
+            "[g] toggle  [s] save  [e] region  [r] fps  [h] help  [q] quit"
         )
         cv2.putText(
             frame, status_str, (8, h - 8),
@@ -615,26 +655,10 @@ def main() -> None:
     save_dir = config.BASE_DIR / "captures"
     save_dir.mkdir(exist_ok=True)
 
-    # ── Detection region ───────────────────────────────────────────────────────
-    # Rectangle loaded from regions/region_config.ini and editable at runtime
-    # with the `e` key. With no INI present the region is the full frame.
-    _tmp_cap = cv2.VideoCapture(1, cv2.CAP_V4L2)
-    _tmp_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    _tmp_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
-    _tmp_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    _fw = int(_tmp_cap.get(cv2.CAP_PROP_FRAME_WIDTH)  or 1920)
-    _fh = int(_tmp_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080)
-    _tmp_cap.release()
-
-    region_rect = load_region_rect(_fw, _fh)
-
-    if _REGION_INI.exists():
-        print(f"  ✓ Region rectangle loaded from {_REGION_INI}")
-    else:
-        print("  ⓘ No detection region — press e to set one.")
-    print()
-
-    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+    # ── Camera ─────────────────────────────────────────────────────────────────
+    # Opened before the region is loaded, so the region default can use the
+    # camera's own frame size — no second probe handle needed.
+    cap = cv2.VideoCapture(0, _CAM_BACKEND)
     if not cap.isOpened():
         sys.exit("\n  ERROR: Cannot open camera (index 0).\n")
 
@@ -642,6 +666,20 @@ def main() -> None:
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)         # minimize latency
+
+    _fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)  or 1920)
+    _fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080)
+
+    # ── Detection region ───────────────────────────────────────────────────────
+    # Rectangle loaded from regions/region_config.ini and editable at runtime
+    # with the `e` key. With no INI present the region is the full frame.
+    region_rect = _clamp_rect(load_region_rect(_fw, _fh), _fw, _fh)
+
+    if _REGION_INI.exists():
+        print(f"  ✓ Region rectangle loaded from {_REGION_INI}")
+    else:
+        print("  ⓘ No detection region — press e to set one.")
+    print()
 
     cv2.namedWindow("OmniXAI Live Detection", cv2.WINDOW_NORMAL)
     cv2.setWindowProperty("OmniXAI Live Detection", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
@@ -692,6 +730,9 @@ def main() -> None:
         # Apply detection region mask for inference
         frame_for_inference = frame.copy()
         h_f, w_f = frame.shape[:2]
+        # Keep the region inside the real frame — the driver may deliver a
+        # different size than it reported at startup.
+        region_rect = _clamp_rect(region_rect, w_f, h_f)
         if _REGION_INI.exists():
             _inf_mask = rect_to_mask(region_rect, h_f, w_f)
             frame_for_inference[_inf_mask < 128] = 0
@@ -758,24 +799,20 @@ def main() -> None:
         # --- Region edit mode: arrow keys move borders ---
         if region_edit_mode and raw_key != -1:
             h_f, w_f = frame.shape[:2]
-            base = raw_key & 0xFFFF
             step = _REGION_STEP
-            if base in (_KEY_UP, _KEY_DOWN, _KEY_LEFT, _KEY_RIGHT):
+            direction = arrow_direction(raw_key)
+            if direction is not None:
                 region_rect_history.append(region_rect.copy())  # save for undo
-            # In shrink mode arrows move the border inward; expand moves outward
-            if base == _KEY_UP:
-                if region_shrink_mode:  region_rect["top"]    += step
-                else:                   region_rect["top"]    -= step
-            elif base == _KEY_DOWN:
-                if region_shrink_mode:  region_rect["bottom"] -= step
-                else:                   region_rect["bottom"] += step
-            elif base == _KEY_LEFT:
-                if region_shrink_mode:  region_rect["left"]   += step
-                else:                   region_rect["left"]   -= step
-            elif base == _KEY_RIGHT:
-                if region_shrink_mode:  region_rect["right"]  -= step
-                else:                   region_rect["right"]  += step
-            region_rect = _clamp_rect(region_rect, w_f, h_f)
+                # In shrink mode arrows move the border inward; expand moves outward
+                if direction == "up":
+                    region_rect["top"]    += step if region_shrink_mode else -step
+                elif direction == "down":
+                    region_rect["bottom"] -= step if region_shrink_mode else -step
+                elif direction == "left":
+                    region_rect["left"]   += step if region_shrink_mode else -step
+                elif direction == "right":
+                    region_rect["right"]  -= step if region_shrink_mode else -step
+                region_rect = _clamp_rect(region_rect, w_f, h_f)
 
         if key == ord("q"):
             if region_edit_mode:
@@ -840,12 +877,8 @@ def main() -> None:
             # OmniXAI full explanation
             if omnixai is not None and OmniImage is not None:
                 try:
-                    rgb_resized = cv2.resize(
-                        cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                        (config.IMG_SIZE, config.IMG_SIZE),
-                    )
                     omni_img = OmniImage(
-                        data=np.array([rgb_resized]),
+                        data=np.array([model_input(frame)]),
                         batched=True,
                         channel_last=True,
                     )

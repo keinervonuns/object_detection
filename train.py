@@ -6,7 +6,7 @@ Features
 • EfficientNet-B0 / B2 / ResNet-50 backbones (ImageNet pre-trained)
 • Rich augmentation: flip, rotate, colour-jitter, random-erase, MixUp
 • Mixed-precision (AMP) for RTX A2000 — faster training, lower VRAM
-• Cosine LR annealing with warm-up
+• Cosine LR annealing (or a step scheduler)
 • Early stopping + best-model checkpointing
 • Classification report + training-curve plot saved to models/
 
@@ -14,12 +14,10 @@ Usage
 ──────
     python train.py
 """
-# 
 import json
 import sys
 import time
-from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -34,7 +32,7 @@ from tqdm import tqdm
 import config
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Gerätekonfiguration - GPU oder CPU Setup
+#  Device setup - GPU or CPU
 # ──────────────────────────────────────────────────────────────────────────────
 
 def setup_device() -> torch.device:
@@ -45,11 +43,11 @@ def setup_device() -> torch.device:
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
-        # GPU-Informationen abrufen und anzeigen
+        # Fetch and print the GPU information
         name  = torch.cuda.get_device_name(0)
         vram  = torch.cuda.get_device_properties(0).total_memory / 1e9
         print(f"  GPU : {name}  ({vram:.1f} GB VRAM)")
-        # CuDNN Benchmark aktivieren für schnellere Berechnung bei fester Eingabegröße
+        # Enable the cuDNN benchmark: faster with a fixed input size
         torch.backends.cudnn.benchmark = True
     else:
         print("  WARNING: CUDA not available. Training on CPU (slow).")
@@ -57,10 +55,10 @@ def setup_device() -> torch.device:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Bildtransformationen - Augmentierung und Normalisierung
+#  Image transforms - augmentation and normalisation
 # ──────────────────────────────────────────────────────────────────────────────
 
-# ImageNet-Normalisierungswerte (Mittelwert und Standardabweichung)
+# ImageNet normalisation values (mean and standard deviation)
 _MEAN = [0.485, 0.456, 0.406]
 _STD  = [0.229, 0.224, 0.225]
 
@@ -73,42 +71,42 @@ def build_transforms() -> Tuple[transforms.Compose, transforms.Compose]:
     Returns:
         Tuple[transforms.Compose, transforms.Compose]: (Training transforms, Validation transforms)
     """
-    # Basis-Trainings-Operationen
+    # Base training operations
     train_ops = [
-        transforms.RandomResizedCrop(config.IMG_SIZE, scale=(0.65, 1.0)),  # Zufällige Zuschnitt-Skalierung
+        transforms.RandomResizedCrop(config.IMG_SIZE, scale=(0.65, 1.0)),  # random crop scaling
     ]
 
-    # Optionale Augmentierungen konfiguriert durch config
+    # Optional augmentations, switched on via config
     if config.AUG_HFLIP:
-        train_ops.append(transforms.RandomHorizontalFlip())  # Horizontale Spiegelung
+        train_ops.append(transforms.RandomHorizontalFlip())  # horizontal flip
     if config.AUG_VFLIP:
-        train_ops.append(transforms.RandomVerticalFlip())    # Vertikale Spiegelung
+        train_ops.append(transforms.RandomVerticalFlip())    # vertical flip
     if config.AUG_ROTATION:
-        train_ops.append(transforms.RandomRotation(config.AUG_ROTATION))  # Zufällige Rotation
+        train_ops.append(transforms.RandomRotation(config.AUG_ROTATION))  # random rotation
     if config.AUG_COLOR_JITTER:
-        # Änderung von Helligkeit, Kontrast, Sättigung und Farbton
+        # vary brightness, contrast, saturation and hue
         train_ops.append(
             transforms.ColorJitter(
                 brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05
             )
         )
 
-    # Normalisierung hinzufügen
+    # Add normalisation
     train_ops += [
-        transforms.ToTensor(),  # Konvertiere zu Tensor und skaliere auf [0, 1]
-        transforms.Normalize(_MEAN, _STD),  # Normalisiere mit ImageNet Werten
+        transforms.ToTensor(),  # To tensor, scaled to [0, 1]
+        transforms.Normalize(_MEAN, _STD),  # normalise with the ImageNet values
     ]
 
-    # Zufälliges Löschen (Cutout) optional hinzufügen
+    # Optional random erase (cutout)
     if config.AUG_RANDOM_ERASE:
         train_ops.append(
             transforms.RandomErasing(p=0.3, scale=(0.02, 0.2), ratio=(0.3, 3.3))
         )
 
-    # Validierungs-Operationen (ohne Augmentierung, nur Normalisierung)
+    # Validation operations (no augmentation, normalisation only)
     val_ops = [
-        transforms.Resize(int(config.IMG_SIZE * 1.15)),  # Vergrößere leicht
-        transforms.CenterCrop(config.IMG_SIZE),  # Schneide Mitte zu
+        transforms.Resize(int(config.IMG_SIZE * 1.15)),  # slightly enlarge
+        transforms.CenterCrop(config.IMG_SIZE),  # centre crop
         transforms.ToTensor(),
         transforms.Normalize(_MEAN, _STD),
     ]
@@ -117,7 +115,7 @@ def build_transforms() -> Tuple[transforms.Compose, transforms.Compose]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Datenladeprogramme - PyTorch DataLoader
+#  Data loading - PyTorch DataLoader
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_loaders(
@@ -133,7 +131,7 @@ def build_loaders(
     Returns:
         Tuple: (Training DataLoader, Validation DataLoader, Class list)
     """
-    # Prüfe, ob Trainings- und Validierungsdaten vorhanden sind
+    # Make sure the train and val folders exist
     if not config.TRAIN_DIR.exists():
         sys.exit(
             f"\n  ERROR: Training folder not found: {config.TRAIN_DIR}\n"
@@ -145,11 +143,11 @@ def build_loaders(
             "  Run `python setup_data.py` first, then add images."
         )
 
-    # Lade Bilder als Klassendatenordner
+    # Load the images as class folders
     train_ds = datasets.ImageFolder(config.TRAIN_DIR, transform=train_tfm)
     val_ds   = datasets.ImageFolder(config.VAL_DIR,   transform=val_tfm)
 
-    # Prüfe auf Diskrepanzen zwischen erkannten und konfigurierten Klassen
+    # Check for a mismatch between detected and configured classes
     detected = train_ds.classes
     config_classes = list(config.CLASSES.keys())
     if detected != config_classes:
@@ -160,24 +158,24 @@ def build_loaders(
             f"        The detected order will be used for this run.\n"
         )
 
-    # PIN_MEMORY für schnellere GPU-Übertragung verwenden, wenn CUDA verfügbar ist
+    # Use PIN_MEMORY for faster host -> GPU copies when CUDA is available
     pin = config.PIN_MEMORY and torch.cuda.is_available()
 
-    # Erstelle Training DataLoader mit Mischen der Daten
+    # Training DataLoader, shuffled
     train_loader = DataLoader(
         train_ds,
         batch_size=config.BATCH_SIZE,
-        shuffle=True,  # Mische Trainingsdaten
-        num_workers=config.NUM_WORKERS,  # Parallele Datenladung
-        pin_memory=pin,  # GPU-Speicher zur schnelleren Übertragung sperren
-        persistent_workers=config.NUM_WORKERS > 0,  # Worker zwischen Epochen behalten
+        shuffle=True,  # shuffle the training data
+        num_workers=config.NUM_WORKERS,  # parallel data loading
+        pin_memory=pin,  # pin memory for faster transfers
+        persistent_workers=config.NUM_WORKERS > 0,  # keep the workers alive between epochs
     )
     
-    # Erstelle Validierungs DataLoader ohne Mischen
+    # Validation DataLoader, not shuffled
     val_loader = DataLoader(
         val_ds,
         batch_size=config.BATCH_SIZE,
-        shuffle=False,  # Keine Mischung für Validierung
+        shuffle=False,  # no shuffling for validation
         num_workers=config.NUM_WORKERS,
         pin_memory=pin,
         persistent_workers=config.NUM_WORKERS > 0,
@@ -187,7 +185,7 @@ def build_loaders(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Modellbau - EfficientNet und ResNet Architekturen
+#  Model building - EfficientNet / ResNet
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_model(
@@ -202,41 +200,41 @@ def build_model(
     Returns:
         Tuple: (Model, GradCAM target layer for visualization)
     """
-    # Wähle Backbone-Architektur basierend auf Konfiguration
+    # Pick the backbone architecture from config
     backbone = config.BACKBONE.lower()
 
     if backbone == "efficientnet_b0":
-        # Lade EfficientNet-B0 mit optionalen ImageNet-Gewichten
+        # Load EfficientNet-B0 with optional ImageNet weights
         w = models.EfficientNet_B0_Weights.IMAGENET1K_V1 if config.PRETRAINED else None
         m = models.efficientnet_b0(weights=w)
-        # Ersetze finale Klassifizierungsschicht mit der korrekten Anzahl Klassen
+        # Replace the final classifier with the right number of classes
         m.classifier[1] = nn.Linear(m.classifier[1].in_features, num_classes)
-        target = m.features[-1]  # GradCAM Zielschicht
+        target = m.features[-1]  # GradCAM target layer
 
     elif backbone == "efficientnet_b2":
-        # Lade EfficientNet-B2 (etwas größer und genauer als B0)
+        # Load EfficientNet-B2 (a bit larger and more accurate than B0)
         w = models.EfficientNet_B2_Weights.IMAGENET1K_V1 if config.PRETRAINED else None
         m = models.efficientnet_b2(weights=w)
         m.classifier[1] = nn.Linear(m.classifier[1].in_features, num_classes)
         target = m.features[-1]
 
     elif backbone == "resnet50":
-        # Lade ResNet-50 mit optionalen ImageNet-Gewichten
+        # Load ResNet-50 with optional ImageNet weights
         w = models.ResNet50_Weights.IMAGENET1K_V1 if config.PRETRAINED else None
         m = models.resnet50(weights=w)
-        # Ersetze vollständig verbundene Schicht
+        # Replace the fully connected layer
         m.fc = nn.Linear(m.fc.in_features, num_classes)
-        target = m.layer4[-1]  # GradCAM Zielschicht
+        target = m.layer4[-1]  # GradCAM target layer
 
     else:
         sys.exit(f"\n  ERROR: Unknown backbone '{config.BACKBONE}'")
 
-    # Verschiebe Modell auf das Zielgerät (GPU/CPU)
+    # Move the model to the target device (GPU/CPU)
     return m.to(device), target
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  MixUp - Datenaugmentierungstechnik
+#  MixUp - data augmentation
 # ──────────────────────────────────────────────────────────────────────────────
 
 def mixup_batch(
@@ -254,11 +252,11 @@ def mixup_batch(
     Returns:
         Tuple: (mixed images, original labels, permuted labels, weight lam)
     """
-    # Ziehe Gewicht lambda aus Beta-Verteilung
+    # Draw the weight lambda from a Beta distribution
     lam   = float(np.random.beta(alpha, alpha))
-    # Erstelle zufällige Permutation für Batch-Indizes
+    # Random permutation of the batch indices
     idx   = torch.randperm(x.size(0), device=x.device)
-    # Mische Bilder: x_new = lambda * x + (1 - lambda) * x_permutiert
+    # Mix the images: x_new = lambda * x + (1 - lambda) * x_permuted
     x_mix = lam * x + (1.0 - lam) * x[idx]
     return x_mix, y, y[idx], lam
 
@@ -284,12 +282,12 @@ def mixup_loss(
     Returns:
         Mixed loss
     """
-    # Berechne gewichteten Durchschnitt der beiden Verluste
+    # Weighted average of the two losses
     return lam * criterion(pred, y_a) + (1.0 - lam) * criterion(pred, y_b)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Trainings- und Validierungsschritte
+#  Training and validation steps
 # ──────────────────────────────────────────────────────────────────────────────
 
 def train_one_epoch(
@@ -313,50 +311,50 @@ def train_one_epoch(
     Returns:
         Tuple: (average loss, accuracy)
     """
-    # Setze Modell in Trainingsmodus
+    # Put the model in training mode
     model.train()
     total_loss = 0.0
     correct    = 0
     total      = 0
 
-    # Durchlaufe alle Batches im Training
+    # Loop over all training batches
     for imgs, labels in tqdm(loader, desc="  train", leave=False, ncols=82):
-        # Verschiebe Daten auf das Zielgerät
+        # Move the data to the target device
         imgs   = imgs.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        # Optionales MixUp-Augmentierung
+        # Optional MixUp augmentation
         use_mixup = config.MIXUP_ALPHA > 0
         if use_mixup:
             imgs, y_a, y_b, lam = mixup_batch(imgs, labels, config.MIXUP_ALPHA)
 
-        # Lösche Gradienten aus letztem Schritt
+        # Clear the gradients from the previous step
         optimizer.zero_grad(set_to_none=True)
 
-        # Forward Pass mit optionaler Mixed Precision
+        # Forward pass, with optional mixed precision
         with torch.cuda.amp.autocast(enabled=config.USE_AMP and device.type == "cuda"):
             outputs = model(imgs)
-            # Berechne Verlust (mit MixUp oder Standard)
+            # Compute the loss (MixUp or plain)
             if use_mixup:
                 loss = mixup_loss(criterion, outputs, y_a, y_b, lam)
             else:
                 loss = criterion(outputs, labels)
 
-        # Backward Pass mit AMP Scaling
+        # Backward pass with AMP scaling
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        # Gradient Clipping zur Vermeidung von numerischer Instabilität
+        # Gradient clipping to avoid numerical instability
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         scaler.step(optimizer)
         scaler.update()
 
-        # Akkumuliere Verlust und Genauigkeitsmetriken
+        # Accumulate loss and accuracy
         total_loss += loss.item() * imgs.size(0)
         total      += imgs.size(0)
         _, predicted = outputs.max(1)
         correct      += predicted.eq(labels).sum().item()
 
-    # Gebe durchschnittliche Metriken zurück
+    # Return the average metrics
     return total_loss / total, correct / total
 
 
@@ -378,39 +376,39 @@ def validate(
     Returns:
         Tuple: (Loss, accuracy, predictions list, labels list)
     """
-    # Setze Modell in Evaluierungsmodus (deaktiviert Dropout, etc.)
+    # Put the model in eval mode (disables dropout, etc.)
     model.eval()
     total_loss = 0.0
     correct    = 0
     total      = 0
-    all_preds  = []  # Speichere alle Vorhersagen für Klassifizierungsbericht
-    all_labels = []  # Speichere alle echten Labels
+    all_preds  = []  # Collect all predictions for the classification report
+    all_labels = []  # Collect the ground-truth labels
 
-    # Durchlaufe alle Validierungs-Batches
+    # Loop over all validation batches
     for imgs, labels in tqdm(loader, desc="    val", leave=False, ncols=82):
         imgs   = imgs.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        # Forward Pass mit Mixed Precision (keine Gradienten berechnet)
+        # Forward pass with mixed precision (no gradients computed)
         with torch.cuda.amp.autocast(enabled=config.USE_AMP and device.type == "cuda"):
             outputs = model(imgs)
             loss    = criterion(outputs, labels)
 
-        # Akkumuliere Metriken
+        # Accumulate the metrics
         total_loss += loss.item() * imgs.size(0)
         total      += imgs.size(0)
         _, predicted = outputs.max(1)
         correct      += predicted.eq(labels).sum().item()
-        # Sammle Vorhersagen und Labels für späteren Bericht
+        # Collect predictions and labels for the report below
         all_preds .extend(predicted.cpu().tolist())
         all_labels.extend(labels.cpu().tolist())
 
-    # Gebe Durchschnittswerte und Listen zurück
+    # Return the averages and the lists
     return total_loss / total, correct / total, all_preds, all_labels
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Visualisierung von Trainingsverlauf
+#  Training-history visualisation
 # ──────────────────────────────────────────────────────────────────────────────
 
 def plot_history(history: dict) -> None:
@@ -419,14 +417,14 @@ def plot_history(history: dict) -> None:
     Args:
         history: Dictionary with keys 'train_loss', 'val_loss', 'train_acc', 'val_acc'
     """
-    # Erstelle Epoch-Achse
+    # Build the epoch axis
     epochs = range(1, len(history["train_loss"]) + 1)
 
-    # Erstelle 2-teilige Subplot-Figur
+    # Two-panel figure
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4))
     fig.suptitle(f"Training — {config.BACKBONE}", fontsize=13, weight="bold")
 
-    # Zeichne Verlustfunktion (linkes Diagramm)
+    # Plot the loss (left panel)
     ax1.plot(epochs, history["train_loss"], label="Train", linewidth=1.8)
     ax1.plot(epochs, history["val_loss"],   label="Val",   linewidth=1.8)
     ax1.set_title("Loss")
@@ -434,7 +432,7 @@ def plot_history(history: dict) -> None:
     ax1.legend()
     ax1.grid(alpha=0.25)
 
-    # Zeichne Genauigkeit in Prozent (rechtes Diagramm)
+    # Plot the accuracy in percent (right panel)
     ax2.plot(epochs, [a * 100 for a in history["train_acc"]], label="Train", linewidth=1.8)
     ax2.plot(epochs, [a * 100 for a in history["val_acc"]],   label="Val",   linewidth=1.8)
     ax2.set_title("Accuracy (%)")
@@ -442,7 +440,7 @@ def plot_history(history: dict) -> None:
     ax2.legend()
     ax2.grid(alpha=0.25)
 
-    # Speichere und zeige Diagramm
+    # Save and show the figure
     plt.tight_layout()
     out = config.MODEL_DIR / "training_curves.png"
     plt.savefig(out, dpi=130, bbox_inches="tight")
@@ -451,25 +449,25 @@ def plot_history(history: dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Hauptfunktion - Komplette Trainings-Pipeline
+#  Main function - the full training pipeline
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     """Main training pipeline for OmniXAI object recognition model."""
-    # Erstelle Modellausgabeverzeichnis, falls nicht vorhanden
+    # Create the model output directory if it is missing
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Gebe Willkommensmeldung aus
+    # Print the welcome banner
     print()
     print("  ╔══════════════════════════════════════════════════════════╗")
     print("  ║            OmniXAI  —  Training Pipeline                 ║")
     print("  ╚══════════════════════════════════════════════════════════╝")
     print()
 
-    # Richte Rechengerät ein
+    # Set up the compute device
     device = setup_device()
 
-    # Gebe Trainingskonfiguration aus
+    # Print the training configuration
     print(f"  Backbone    : {config.BACKBONE}")
     print(f"  Image size  : {config.IMG_SIZE}×{config.IMG_SIZE}")
     print(f"  Batch size  : {config.BATCH_SIZE}")
@@ -478,14 +476,14 @@ def main() -> None:
     print(f"  MixUp α     : {config.MIXUP_ALPHA}")
     print()
 
-    # ── Daten ────────────────────────────────────────────────────────────────────
-    # Erstelle Bildtransformationen
+    # ── Data ─────────────────────────────────────────────────────────────────────
+    # Build the image transforms
     train_tfm, val_tfm = build_transforms()
-    # Baue DataLoader für Training und Validierung
+    # Build the DataLoaders for training and validation
     train_loader, val_loader, classes = build_loaders(train_tfm, val_tfm)
     num_classes = len(classes)
 
-    # Gebe Dateninfo aus
+    # Print the dataset info
     print(f"  Classes     : {classes}")
     print(
         f"  Samples     : {len(train_loader.dataset)} train  /  "
@@ -493,90 +491,90 @@ def main() -> None:
     )
     print()
 
-    # ── Modell ────────────────────────────────────────────────────────────────────
-    # Baue Modell mit Backbone und trainierbare Parameter
+    # ── Model ─────────────────────────────────────────────────────────────────────
+    # Build the model with the configured backbone
     model, _ = build_model(num_classes, device)
     n_params  = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Trainable parameters : {n_params:,}")
     print()
 
-    # ── Optimierer & Lernratenscheduler ───────────────────────────────────────────
-    # Verwende Cross-Entropy-Verlust mit Label-Smoothing zur Regularisierung
+    # ── Optimiser & LR scheduler ──────────────────────────────────────────────────
+    # Cross-entropy loss with label smoothing for regularisation
     criterion = nn.CrossEntropyLoss(label_smoothing=config.LABEL_SMOOTHING)
-    # AdamW Optimierer mit Gewichtszerfallsregularisierung
+    # AdamW optimiser with weight-decay regularisation
     optimizer = optim.AdamW(
         model.parameters(),
         lr=config.LEARNING_RATE,
         weight_decay=config.WEIGHT_DECAY,
     )
 
-    # Wähle Lernratenscheduler basierend auf Konfiguration
+    # Pick the LR scheduler from config
     if config.SCHEDULER == "cosine":
-        # Kosinus-Annealing mit Aufwärmphase
+        # Cosine annealing
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=config.NUM_EPOCHS, eta_min=1e-7
         )
     else:
-        # Schrittenweise Reduktion der Lernrate
+        # Step-wise LR reduction
         scheduler = optim.lr_scheduler.StepLR(
             optimizer,
             step_size=config.STEP_LR_STEP,
             gamma=config.STEP_LR_DECAY,
         )
 
-    # Gradient Scaler für automatische gemischte Präzision
+    # Gradient scaler for automatic mixed precision
     scaler = torch.cuda.amp.GradScaler(
         enabled=config.USE_AMP and device.type == "cuda"
     )
 
-    # ── Trainings-Hauptschleife ──────────────────────────────────────────────────
-    # Verfolgung der besten Validierungsgenauigkeit
+    # ── Training loop ────────────────────────────────────────────────────────────
+    # Track the best validation accuracy
     best_val_acc     = 0.0
-    # Zähler für frühes Stoppen
+    # Early-stopping counter
     patience_counter = 0
-    # Speichere Verlauf für Visualisierung
+    # History kept for plotting
     history: dict    = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
 
     print("  ┌──────────────────────────────────────────────────────────┐")
 
-    # Speichere beste Vorhersagen und Labels für Klassifizierungsbericht
+    # Best-epoch predictions and labels for the classification report
     final_preds, final_labels = [], []
 
-    # Durchlaufe alle Epochen
+    # Loop over all epochs
     for epoch in range(1, config.NUM_EPOCHS + 1):
-        # Starte Zeit-Messung
+        # Start the timer
         t0 = time.perf_counter()
 
-        # Trainiere eine Epoche
+        # Train one epoch
         tr_loss, tr_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, scaler, device
         )
-        # Validiere nach Training
+        # Validate after training
         vl_loss, vl_acc, epoch_preds, epoch_labels = validate(
             model, val_loader, criterion, device
         )
-        # Aktualisiere Lernrate
+        # Update the learning rate
         scheduler.step()
 
-        # Berechne verstrichene Zeit und aktuelle Lernrate
+        # Elapsed time and current learning rate
         elapsed = time.perf_counter() - t0
         lr_now  = optimizer.param_groups[0]["lr"]
 
-        # Speichere Metriken im Verlauf
+        # Append the metrics to the history
         history["train_loss"].append(tr_loss)
         history["train_acc"] .append(tr_acc)
         history["val_loss"]  .append(vl_loss)
         history["val_acc"]   .append(vl_acc)
 
-        # Prüfe auf neue beste Validierungsgenauigkeit
+        # Check for a new best validation accuracy
         saved = ""
         if vl_acc > best_val_acc:
-            # Neue beste Genauigkeit gefunden
+            # New best accuracy
             best_val_acc     = vl_acc
-            patience_counter = 0  # Setze Geduld-Zähler zurück
+            patience_counter = 0  # reset the patience counter
             final_preds      = epoch_preds
             final_labels     = epoch_labels
-            # Speichere Modell-Checkpoint
+            # Save the model checkpoint
             torch.save(
                 {
                     "epoch":       epoch,
@@ -589,11 +587,11 @@ def main() -> None:
             )
             saved = "  ✓ saved"
         else:
-            # Keine Verbesserung, erhöhe Geduld-Zähler
+            # No improvement - bump the patience counter
             patience_counter += 1
             saved = f"  ({patience_counter}/{config.EARLY_STOP})"
 
-        # Gebe Epoch-Statistik aus
+        # Print the epoch summary
         print(
             f"  │ Ep {epoch:>3}/{config.NUM_EPOCHS}"
             f"  train {tr_acc*100:5.2f}% ℓ{tr_loss:.4f}"
@@ -602,7 +600,7 @@ def main() -> None:
             f"  {elapsed:.0f}s{saved}"
         )
 
-        # Frühes Stoppen wenn Geduld überschritten
+        # Early stop once patience is exhausted
         if patience_counter >= config.EARLY_STOP:
             print(f"  │  Early stopping after epoch {epoch}.")
             break

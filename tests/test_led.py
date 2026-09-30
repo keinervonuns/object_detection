@@ -11,7 +11,7 @@ Two modes, selected with --mode:
              (GPIO 17/27/22/23 = bits 0/1/2/3). Enter 0-15 to show a value,
              16 to cycle through all of them, 'q' to quit.
 
-Usage (run from the Torch/ directory):
+Usage (run from the project root):
     python tests/test_led.py                 # single-LED test on GPIO 17
     python tests/test_led.py --mode binary   # 4-LED binary display
 

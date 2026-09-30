@@ -21,7 +21,6 @@ Image extensions recognised: .jpg  .jpeg  .png  .bmp  .webp  .tiff
 import random
 import shutil
 import sys
-from pathlib import Path
 
 import config
 
@@ -104,6 +103,7 @@ def split_data() -> None:
         )
 
         if not images:
+            totals["skipped"] += 1
             print(f"  {cls:<22}  {'(no images — skipped)':>18}")
             continue
 
@@ -139,6 +139,8 @@ def split_data() -> None:
 
     print()
     print(f"  Total — train: {totals['train']}   val: {totals['val']}")
+    if totals["skipped"]:
+        print(f"  Classes skipped (no images): {totals['skipped']}")
     print()
     print(f"  data/train  →  {config.TRAIN_DIR}")
     print(f"  data/val    →  {config.VAL_DIR}")

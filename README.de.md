@@ -11,7 +11,8 @@ Der Workflow: Bilder sammeln → train/val aufteilen → trainieren → Modell a
 Pi kopieren → Erkennung starten, mit GradCAM + OmniXAI (LIME)-Erklärbarkeit und
 Region-Maskierung.
 
-Alles liegt unter [`Torch/`](Torch/).
+Alles wird aus dem **Projekt-Root** ausgeführt — dem Ordner, der `config.py`,
+`run.py` und diese README enthält.
 
 ---
 
@@ -40,7 +41,7 @@ Alles liegt unter [`Torch/`](Torch/).
 ## Projektstruktur
 
 ```
-Torch/
+.                          ← Projekt-Root: führe alle Befehle von hier aus
 ├── source/                  ← HIER KOMMEN DEINE ROHBILDER HIN (ein Ordner pro Klasse)
 │   ├── background/
 │   ├── blue_cube/
@@ -78,7 +79,7 @@ Torch/
 ```
 
 `source/`, `data/`, `models/`, `captures/` und `regions/` werden zur Laufzeit
-erstellt/genutzt; `data/*` und `models/*` sind git-ignoriert.
+erstellt/genutzt; `data/` und `models/` sind git-ignoriert.
 
 ---
 
@@ -86,7 +87,7 @@ erstellt/genutzt; `data/*` und `models/*` sind git-ignoriert.
 
 Du kannst auf einem GPU-Rechner trainieren und das Modell auf den Pi kopieren —
 oder direkt auf dem Pi trainieren (nur CPU, deutlich langsamer). Beides nutzt
-denselben Code und dasselbe `Torch/`-Verzeichnis.
+demselben Code und demselben Projektordner.
 
 | | Option A — Training auf einem GPU-Rechner *(empfohlen)* | Option B — alles auf dem Pi |
 |---|---|---|
@@ -110,7 +111,7 @@ PyTorch liefert unter Windows bei aktuellen Versionen standardmäßig ein
 CUDA-fähiges Wheel.
 
 ```powershell
-cd Torch
+cd <project-root>          # der Ordner, der config.py enthält
 
 # Virtuelle Umgebung erstellen und aktivieren
 python -m venv venv
@@ -143,7 +144,7 @@ Hinweise zu Windows:
 ### 2.2 GPU-Trainingsrechner — Linux
 
 ```bash
-cd Torch
+cd <project-root>          # der Ordner, der config.py enthält
 python3 -m venv venv
 source venv/bin/activate
 python -m pip install --upgrade pip
@@ -163,7 +164,7 @@ Kopiere das gesamte Projekt auf den Pi. GPIO (`RPi.GPIO`) liegt im
 **System**-Python, während die schweren Pakete aus der venv kommen.
 
 ```bash
-cd ~/pidetection/Torch     # dorthin, wo du das Projekt legst
+cd ~/pidetection          # dorthin, wo du das Projekt legst
 
 # venv mit demselben Python wie das System-python3 erstellen (3.13 auf dem Pi 5)
 python3 -m venv venv
@@ -182,7 +183,9 @@ deactivate
 `omnixai` ist überall optional: Es wird verzögert und abgesichert importiert.
 Fehlt es, läuft der Live-Feed trotzdem mit Echtzeit-GradCAM und der vollständigen
 Oberfläche — du verlierst nur den HTML-Bericht, den die `s`-Taste schreibt. Der
-Rest von `requirements.txt` (torch, torchvision, opencv, numpy) ist erforderlich.
+Rest von `requirements.txt` (torch, torchvision, opencv, numpy, matplotlib, scikit-learn, tqdm) ist
+erforderlich — `train.py` importiert zusätzlich `matplotlib`, `scikit-learn` und
+`tqdm`.
 
 > **`omnixai` installieren:** Nutze `pip install "omnixai[vision,plot]"`, **nicht**
 > `omnixai[all]`. `[all]` zieht zusätzlich die NLP-/BentoML-Stacks, und die
@@ -288,7 +291,7 @@ neu auf):
 
 ### 6.1 Auf einem GPU-Rechner (empfohlen)
 
-Mit aktivierter venv, aus `Torch/`:
+Mit aktivierter venv, aus dem Projekt-Root:
 
 ```bash
 # Windows: venv\Scripts\Activate.ps1     Linux: source venv/bin/activate
@@ -307,7 +310,7 @@ python train.py
 | Einstellung | Standard (A2000) | Hinweise |
 |-------------|------------------|----------|
 | `BACKBONE` | `resnet50` | Auch `efficientnet_b0`, `efficientnet_b2` |
-| `IMG_SIZE` | `224` | Native Größe für alle Backbones |
+| `IMG_SIZE` | `224` | Eingabegröße (nativ für EfficientNet-B0 / ResNet-50) |
 | `BATCH_SIZE` | `32` | Bei CUDA Out-of-Memory auf `16` senken |
 | `NUM_EPOCHS` | `50` | Early Stopping kann früher beenden |
 | `LEARNING_RATE` | `3e-4` | AdamW-Lernrate |
@@ -367,23 +370,23 @@ vorhanden):
 
 ```bash
 # auf dem Pi
-mkdir -p ~/pidetection/Torch/models
+mkdir -p ~/pidetection/models
 ```
 
 **Von Linux/macOS (Trainingsrechner):**
 
 ```bash
 # scp
-scp Torch/models/best_model.pth pi@raspberrypi.local:/home/pi/pidetection/Torch/models/
+scp models/best_model.pth pi@raspberrypi.local:/home/pi/pidetection/models/
 
 # oder rsync (fortsetzbar, mit Fortschritt)
-rsync -avP Torch/models/best_model.pth pi@raspberrypi.local:/home/pi/pidetection/Torch/models/
+rsync -avP models/best_model.pth pi@raspberrypi.local:/home/pi/pidetection/models/
 ```
 
 **Von Windows (PowerShell, integriertes OpenSSH-`scp`):**
 
 ```powershell
-scp .\Torch\models\best_model.pth pi@raspberrypi.local:/home/pi/pidetection/Torch/models/
+scp .\models\best_model.pth pi@raspberrypi.local:/home/pi/pidetection/models/
 ```
 
 Ersetze `pi@raspberrypi.local` durch Benutzer und Host (oder IP) deines Pi.
@@ -441,38 +444,46 @@ python run.py --no-gpio
 Praktisch, um das Modell auf dem Rechner zu testen, der es trainiert hat — ohne
 Pi.
 
-In beiden Fällen wird die Kamera als **Index 0, V4L2, MJPG, 1920×1080, Buffer 1**
-in einem Vollbildfenster geöffnet. Ein zweiter Capture-Handle (Index 1) wird beim
-Start kurz geöffnet, nur um die Frame-Größe für den Region-Standard zu lesen.
+In beiden Fällen wird die Kamera als **Index 0, MJPG, 1920×1080, Buffer 1** in
+einem Vollbildfenster geöffnet — mit dem **V4L2**-Backend unter Linux und dem
+Plattform-Standard anderswo. Die vom Capture gemeldete Frame-Größe (Fallback
+`1920×1080`) ist der Standard für das Regionsrechteck.
 
-**Tastatursteuerung:**
+Jeder Frame wird genau wie die Trainings-Transformation vorverarbeitet — die
+*kürzere* Kante wird auf `IMG_SIZE × 1.15` skaliert (Seitenverhältnis bleibt
+erhalten), dann wird das mittige `IMG_SIZE × IMG_SIZE`-Quadrat zugeschnitten —
+sodass jede Kameraauflösung dem Modell so zugeführt wird, wie es trainiert wurde.
+
+**Tastatursteuerung** — wird in Kleinschreibung abgeglichen (mit Shift
+funktioniert es nicht):
 
 | Taste | Aktion |
 |-------|--------|
-| `G` | GradCAM-Heatmap-Overlay umschalten |
-| `S` | Aktuellen Frame + OmniXAI-HTML-Bericht speichern |
-| `E` | Region-Bearbeitungsmodus betreten / verlassen (speichert das Rechteck beim Verlassen) |
-| `R` | FPS-Zähler zurücksetzen |
-| `H` | Hilfe im Terminal ausgeben |
-| `Q` | Beenden — oder im Region-Bearbeitungsmodus die Region speichern und den Modus verlassen |
+| `g` | GradCAM-Heatmap-Overlay umschalten |
+| `s` | Aktuellen Frame + OmniXAI-HTML-Bericht speichern |
+| `e` | Region-Bearbeitungsmodus betreten / verlassen (speichert das Rechteck beim Verlassen) |
+| `r` | FPS-Zähler zurücksetzen |
+| `h` | Hilfe im Terminal ausgeben |
+| `q` | Beenden — oder im Region-Bearbeitungsmodus die Region speichern und den Modus verlassen |
 
 **Im Region-Bearbeitungsmodus:**
 
 | Taste | Aktion |
 |-------|--------|
 | Pfeiltasten | Aktive Kante verschieben (`SHRINK` bewegt sie nach innen, `EXPAND` nach außen) |
-| `S` | Expand / Shrink umschalten (außerhalb des Modus *speichert* `s`) |
-| `Z` | Letzte Kantenbewegung rückgängig machen |
-| `C` | Region auf das volle Bild zurücksetzen |
-| `E` / `Q` | Bestätigen, nach `regions/region_config.ini` speichern, Modus verlassen |
+| `s` | Expand / Shrink umschalten (außerhalb des Modus *speichert* `s`) |
+| `z` | Letzte Kantenbewegung rückgängig machen |
+| `c` | Region auf das volle Bild zurücksetzen |
+| `e` / `q` | Bestätigen, nach `regions/region_config.ini` speichern, Modus verlassen |
 
 **Bildschirmanzeige:** oberes Banner (Klasse + Konfidenzbalken), Seitenleiste
 (Top-3-Wahrscheinlichkeiten), untere Leiste (FPS, GradCAM-Status, Tastenhinweise)
 und eine abgedunkelte Umrandung, die den Bereich außerhalb der Erkennungsregion
 zeigt (gelb beim Bearbeiten, sonst grün).
 
-> Das Klassen-Label ändert sich erst, nachdem es `DISPLAY_SECONDS` (Standard
-> `1.0`) stabil war, um Flackern zu vermeiden; die Konfidenz wird derweil weiter
+> Nachdem die angezeigte Klasse gewechselt hat, wird der nächste Wechsel für
+> `DISPLAY_SECONDS` (Standard `1.0`) zurückgehalten, damit eine einzelne
+> Fehlvorhersage das Label nicht umwirft; die Konfidenz wird derweil weiter
 > aktualisiert.
 
 ---
@@ -490,9 +501,11 @@ right = 1696
 bottom = 744
 ```
 
-Drücke `e`, verschiebe die Kanten mit den Pfeiltasten und drücke erneut `e` zum
-Speichern. Das Rechteck wird am Frame begrenzt und kann nicht unter 40 px pro
-Seite schrumpfen.
+Drücke `e`, verschiebe die Kanten mit den Pfeiltasten (sowohl die X11- als auch
+die Windows-Tastencodes werden erkannt) und drücke erneut `e` zum Speichern. Das
+Rechteck wird am Frame begrenzt und kann nicht unter 40 px pro Seite schrumpfen —
+auch die beim Start aus der INI geladenen Werte werden an die Frame-Größe der
+Kamera angepasst.
 
 ---
 
@@ -525,7 +538,8 @@ Pipeline startest.
 
 ## Tests
 
-Eigenständige Hardware-Checks liegen in `tests/` (führe sie aus `Torch/` aus):
+Eigenständige Hardware-Checks liegen in `tests/` (führe sie aus dem Projekt-Root
+aus):
 
 ```bash
 python tests/test_camera.py            # Live-Vorschau + tatsächliche Auflösung
@@ -557,22 +571,23 @@ python tests/test_led.py --mode binary # 4-LED-Binäranzeige (0–15)
 ## Kamera wechseln
 
 ```python
-cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+cap = cv2.VideoCapture(0, _CAM_BACKEND)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 ```
 
-Ändere das erste Argument (`0` → `1`, `2`, …) für ein anderes Gerät. `CAP_V4L2`
-ist nur unter Linux verfügbar — entferne es unter Windows/macOS. `run.py`,
-`capture_images.py` und `tests/test_camera.py` teilen diese Einstellungen, also
-passe alle drei gemeinsam an.
+Ändere das erste Argument (`0` → `1`, `2`, …) für ein anderes Gerät. Das Backend
+wird automatisch gewählt — V4L2 unter Linux, der Plattform-Standard anderswo
+(`_CAM_BACKEND` am Anfang jedes Skripts) —, sodass derselbe Code auf dem Pi und
+auf einem Windows-PC läuft. `run.py`, `capture_images.py` und
+`tests/test_camera.py` teilen diese Einstellungen, also passe alle drei gemeinsam
+an.
 
-Es gibt außerdem einen **zweiten** Capture bei Index `1`, der nur geöffnet wird,
-um die als Region-Standard genutzten Frame-Maße zu lesen; schlägt er fehl, fällt
-er still auf `1920×1080` zurück. Führe `python tests/test_camera.py` aus, um Index
-und Auflösung zu bestätigen.
+Die Standardgröße des Regionsrechtecks ist die vom Capture gemeldete Frame-Größe
+(Fallback `1920×1080`), und das Rechteck wird am echten Frame begrenzt. Führe
+`python tests/test_camera.py` aus, um Index und Auflösung zu bestätigen.
 
 > **Auf dem Pi:** Der Feed öffnet ein **V4L2**-Gerät, daher funktioniert eine
 > **USB-Webcam** sofort. Für die CSI-Flachkamera die V4L2-Kompatibilitätsschicht
@@ -614,9 +629,9 @@ im Checkpoint gespeicherten `backbone`-Feld neu auf, daher ist dort keine
 |---------|--------|
 | `CUDA out of memory` | `BATCH_SIZE` auf `16` oder `8` senken |
 | `torch.cuda.is_available()` ist `False` | Installiere das zu deinem Treiber passende CUDA-Wheel von pytorch.org |
-| `Import torch could not be resolved` (VS Code) | Wähle den venv-Interpreter: `Ctrl+Shift+P` → *Python: Select Interpreter* → `Torch/venv` |
+| `Import torch could not be resolved` (VS Code) | Wähle den venv-Interpreter: `Ctrl+Shift+P` → *Python: Select Interpreter* → `venv` |
 | PowerShell führt `Activate.ps1` nicht aus | `Set-ExecutionPolicy -Scope Process Bypass`, dann erneut ausführen |
-| `Cannot open camera` | Index/Auflösung mit `python tests/test_camera.py` prüfen; die Kamera nutzt `CAP_V4L2` (nur Linux) |
+| `Cannot open camera` | Index/Auflösung mit `python tests/test_camera.py` prüfen; das Backend ist V4L2 unter Linux, der Plattform-Standard anderswo |
 | `No trained model found` | Erst trainieren (`python train.py`) oder [das Modell auf den Pi kopieren](#7-modell-auf-den-pi-kopieren) |
 | Symlink-Fehler unter Windows | Entwicklermodus aktivieren oder `COPY_FILES = True` setzen |
 | Sehr geringe Genauigkeit | Mehr Bilder hinzufügen; prüfen, ob die Ordnernamen exakt `CLASSES` entsprechen |

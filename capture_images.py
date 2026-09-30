@@ -10,15 +10,20 @@ Controls (while camera window is open)
   q      — quit
 """
 
+import sys
 import time
+
 import cv2
 import config
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 CONTINUOUS_INTERVAL_MS = 500   # ms between auto-saves in continuous mode
 
+# V4L2 exists on Linux only; elsewhere let OpenCV pick the default backend.
+_CAM_BACKEND = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
+
 # ── Camera ────────────────────────────────────────────────────────────────────
-cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+cap = cv2.VideoCapture(0, _CAM_BACKEND)
 if not cap.isOpened():
     raise SystemExit("ERROR: Cannot open camera (index 0).")
 
@@ -43,17 +48,18 @@ def save_dir():
     return d
 
 def next_index(d):
-    """Return the next available image index in the save directory."""
-    existing = list(d.glob("*.jpg"))
-    if not existing:
-        return 0
+    """Return the next free image index in the save directory (max + 1).
+
+    Non-numeric stems (e.g. timestamp names) are ignored, so a new file can
+    never land on top of an existing one.
+    """
     nums = []
-    for p in existing:
+    for p in d.glob("*.jpg"):
         try:
             nums.append(int(p.stem))
         except ValueError:
             pass
-    return max(nums) + 1 if nums else len(existing)
+    return max(nums) + 1 if nums else 0
 
 def save_frame(frame):
     d = save_dir()
