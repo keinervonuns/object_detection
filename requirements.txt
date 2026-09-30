@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  OmniXAI Detection Pipeline — Python dependencies
+#
+#  These are the packages the pipeline actually runs on. Install them first:
+#
+#      pip install -r requirements.txt
+#
+#  `omnixai` is OPTIONAL. It powers only the HTML explanation report that the
+#  `s` key writes in run.py — the live feed, the real-time GradCAM overlay (`g`)
+#  and the GPIO LED output all work without it. If you do want that report, add
+#  it afterwards, preferably with narrow extras (see the notes below):
+#
+#      pip install "omnixai[vision,plot]"
+#      pip install -r requirements.txt      # re-apply the pins below (see note 2)
+#
+#  Notes on installing omnixai:
+#
+#   1. Don't reach for `omnixai[all]` just to get the vision report. `[all]` also
+#      pulls the NLP/BentoML stacks (nltk, polyjuice-nlp, bentoml, dash, shap,
+#      SALib, hnswlib, ...) that an image GradCAM/LIME report does not need.
+#   2. OpenCV: omnixai's vision/`all` extras install opencv-python-HEADLESS,
+#      which has NO GUI functions — cv2.imshow / cv2.namedWindow / cv2.waitKeyEx
+#      would fail. The pipeline needs the GUI build pinned below
+#      (opencv-python). Both provide the same `cv2` module, so install
+#      opencv-python last / re-run this file afterwards.
+#   3. scikit-learn: omnixai's 2023-era release pins an older scikit-learn
+#      (upper bound below 1.2 in its metadata), which can conflict with the
+#      version below. Re-running this file after omnixai restores it.
+#
+#  The versions below are therefore also "the ones that have to win".
+# ─────────────────────────────────────────────────────────────────────────────
+
+torch>=2.1
+torchvision>=0.16
+opencv-python>=4.8
+numpy>=1.24
+matplotlib>=3.7
+scikit-learn>=1.3
+tqdm>=4.66
+Pillow>=10.0
+plotly>=5.18
