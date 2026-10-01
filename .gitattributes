@@ -1,0 +1,12 @@
+# Line endings for cross-platform scripts (PC <-> Raspberry Pi).
+# Shell scripts must stay LF or bash refuses to run them; Windows batch
+# files must stay CRLF for cmd.exe. core.autocrlf=true would otherwise
+# rewrite start_ui_linux.sh to CRLF in the working copy on Windows, and the
+# file would break once copied to the Pi.
+*.sh   text eol=lf
+*.bash text eol=lf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Keep this file itself LF so the rules above are parsed consistently.
+.gitattributes text eol=lf
